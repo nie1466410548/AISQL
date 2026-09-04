@@ -66,7 +66,39 @@ embedding 预筛选后再由大模型判断
 
 因此，优化器既要决定 AI 算子在计划中的位置，也要决定它采用哪种物理实现。
 
-## 3. 当前研究主要回答的三类决策
+## 3. 问题的形式化定义
+
+给定查询 `Q`，其中包含关系算子集合 `R` 和 AI 算子集合 `A = {o₁, …, oₙ}`。每个 AI 算子 `oᵢ` 包含算子类型、自然语言任务 `φᵢ` 和输入属性。
+
+一个候选执行计划可以表示为：
+
+```text
+p = <T, ρ, π, ι>
+```
+
+| 符号 | 含义 |
+|---|---|
+| `T` | 关系计划骨架，包括 Join Order、普通算子和访问路径 |
+| `ρ` | Rewriting：查询或 AI 任务采用什么逻辑表达 |
+| `π` | Placement：AI 算子位于计划的什么位置、按什么顺序执行 |
+| `ι` | Physical Selection：各 AI 算子使用的模型、级联、检索器以及 batch、缓存等执行配置 |
+
+对候选计划 `p`，优化器需要估计其货币成本 `Money(p)`、延迟 `Latency(p)`、资源消耗 `Resource(p)` 和结果质量 `Quality(p)`。计划选择可以表示为：
+
+```text
+在 Quality(p) ≥ τ 的条件下，
+最小化 Money(p)、Latency(p) 和 Resource(p)；
+或者在这些目标之间选择 Pareto 最优计划。
+```
+
+这里的关键不是把传统查询优化简单改写成“随机组合优化”。传统优化器的基数和代价估计本来就可能存在误差，近似查询处理也会考虑误差约束。AI 算子带来的主要变化是：
+
+- AI 谓词的输出分布与模型、prompt、推理参数和输入数据绑定，不能只绑定到逻辑表达式；
+- 不同物理实现可能返回不同结果，物理选择不再天然保持逻辑等价；
+- Placement 和 Rewriting 可能改变模型看到的输入、上下文和任务形式，进而同时改变基数、成本和质量；
+- 结果质量因此成为计划属性，需要与成本和延迟一起参与候选计划比较。
+
+## 4. 当前研究主要回答的三类决策
 
 现有 AI SQL 查询优化工作可以归纳为三类：
 
@@ -76,7 +108,7 @@ embedding 预筛选后再由大模型判断
 | **Physical Selection** | 每个逻辑 AI 算子采用什么实现 | 模型选择、小模型—大模型级联、embedding 代理、batch 和缓存 | Cortex AISQL、LOTUS、ThalamusDB、Palimpzest/Abacus |
 | **Rewriting** | 查询或 AI 算子能否改写成成本更低的表达形式 | Semantic Join 改写为分类、AI Filter 融合、AI 聚合分层、pipeline rewrite | Cortex AISQL、Sema、DocETL/MOAR、PLOP |
 
-### 3.1 Placement
+### 4.1 Placement
 
 Placement 决定 AI 算子相对 Filter、Join、Aggregate 等算子的位置。例如，同一个商品描述在与评论 Join 后可能重复出现多次，因此 `AI_FILTER('商品描述宣称静音', description)` 放在 Join 前还是 Join 后，会改变输入规模和模型调用方式。
 
@@ -84,13 +116,13 @@ Cortex AISQL 的公开案例中，调整普通谓词、文本 AI 谓词和图像
 
 ![Cortex AISQL 中的 Placement 示例](figures/plan_ab.png)
 
-### 3.2 Physical Selection
+### 4.2 Physical Selection
 
 Physical Selection 决定逻辑 AI 算子怎样执行。例如，`AI_FILTER` 可以直接使用大模型，也可以先由便宜的 proxy 模型判断，只把不确定样本交给 oracle 模型。不同实现的成本、延迟和结果质量可能不同。
 
 ![Cortex AISQL 的小模型—大模型级联](figures/aisqlfig2.png)
 
-### 3.3 Rewriting
+### 4.3 Rewriting
 
 Rewriting 改变查询或语义任务的表达方式。例如，当 Semantic Join 的一侧是适合作为候选标签的有限集合时，可以尝试把逐对语义判断改写为分类，再执行普通等值 Join，从而把约 `M × N` 次判断降为约 `M` 次模型调用。
 
@@ -99,3 +131,15 @@ Rewriting 改变查询或语义任务的表达方式。例如，当 Semantic Joi
 ![Semantic Join 改写为分类](figures/join_rewrite.png)
 
 Placement、Physical Selection 和 Rewriting 分别对应传统优化器中的谓词迁移、物理算子选择和查询重写。当前工作已经分别研究了这三类决策，但多数系统只覆盖其中一部分，或者分别优化各个部分。
+
+## 5. 问题的研究形态
+
+相关工作使用的接口和计划载体并不相同，主要可以分为三类：
+
+| 研究形态 | AI 算子位于哪里 | 代表系统 | 主要涉及的优化问题 |
+|---|---|---|---|
+| 关系查询引擎 | AI 函数或语义算子进入 SQL 关系计划 | Cortex AISQL、BigQuery、ThalamusDB、PLOP、Sema | 与 Join Order、关系算子、访问路径和分布式执行联合优化 |
+| 声明式语义处理框架 | AI 算子组成 DataFrame 或 DSL pipeline | LOTUS、DocETL/MOAR、Palimpzest | 算子实现选择、pipeline rewrite 和成本—质量权衡 |
+| 任务规划与算子 DAG | 规划器根据任务生成专用算子图 | CAESURA、AOP、CADENZA | 任务分解、算子编排以及专用模型与大模型之间的选择 |
+
+本文重点关注第一类，因为它直接涉及传统数据库优化器；后两类虽然不一定使用 SQL 接口，但其中的 Placement、Physical Selection 和 Rewriting 方法仍可为 AI SQL 查询优化提供参考。
